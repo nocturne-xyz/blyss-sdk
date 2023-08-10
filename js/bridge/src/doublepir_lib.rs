@@ -2,15 +2,33 @@ use doublepir_rs::{
     database::DbInfo, doublepir::*, matrix::SquishParams, params::Params, pir::PirClient,
     serializer::Serialize,
 };
-use js_sys::{Promise, Uint8Array};
+use js_sys::Uint8Array;
 use serde_json::{self, Value};
 use std::{convert::TryInto, fmt::Write};
 use wasm_bindgen::prelude::*;
 
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
-use wasm_bindgen_futures::JsFuture;
 use web_sys::console;
+
+use aes::{
+    cipher::{KeyIvInit, StreamCipher},
+    Aes128
+};
+use ctr::Ctr64BE;
+use futures::future;
+
+type Aes128Ctr = Ctr64BE<Aes128>;
+
+const AES_KEY_1: [u8; 16] = [
+  0x9c, 0x22, 0x77, 0x85, 0x45, 0xac, 0x22, 0x97, 0x41, 0x90, 0x8e, 0x65, 0x2d,
+  0x33, 0x3a, 0x0f
+];
+
+const AES_KEY_2: [u8; 16] = [
+  0x5f, 0xff, 0xc4, 0x82, 0xc7, 0x2a, 0x85, 0x4a, 0x10, 0x35, 0x9e, 0x9f, 0xa2,
+  0xf5, 0xe0, 0x7f
+];
 
 fn row_from_key(num_entries: u64, key: &str) -> u64 {
     let buckets_log2 = (num_entries as f64).log2().ceil() as usize;
@@ -86,20 +104,23 @@ pub struct DoublePIRApiClient {
     query_plan: Vec<Option<(u64, u64)>>,
 }
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = window)]
-    fn aes_derive_fast_1(ctr: u32, dst: *mut u8, len: u32) -> Promise;
+fn aes_derive_fast(key_idx: u32, ctr: u32, dst: &mut [u8]) {
+    let data = vec![0u8; dst.len()];
 
-    #[wasm_bindgen(js_namespace = window)]
-    fn aes_derive_fast_2(ctr: u32, dst: *mut u8, len: u32) -> Promise;
+    let key = if key_idx == 1 { &AES_KEY_1 } else { &AES_KEY_2 };
+
+    let mut ctr_bytes = [0u8; 16];
+    (&mut ctr_bytes[12..]).copy_from_slice(&ctr.to_be_bytes());
+
+    let mut cipher = Aes128Ctr::new(key.into(), &ctr_bytes.into());
+    cipher.apply_keystream_b2b(&data, dst).expect("aes_derive_fast failed!");
 }
 
-fn derive_fast(seed: u32, ctr: u32, dst: &mut [u8]) -> JsFuture {
+fn derive_fast(seed: u32, ctr: u32, dst: &mut [u8]) -> future::Ready<()> {
     if seed == 1 {
-        JsFuture::from(aes_derive_fast_1(ctr, dst.as_mut_ptr(), dst.len() as u32))
+        future::ready(aes_derive_fast(1, ctr, dst))
     } else {
-        JsFuture::from(aes_derive_fast_2(ctr, dst.as_mut_ptr(), dst.len() as u32))
+        future::ready(aes_derive_fast(2, ctr, dst))
     }
 }
 
